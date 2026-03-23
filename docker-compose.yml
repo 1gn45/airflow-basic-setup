@@ -1,0 +1,105 @@
+---
+# Apache Airflow – Docker Compose setup for Windows
+# Airflow home on the host: C:\airflow  (configured via AIRFLOW_HOME in .env)
+#
+# Directory layout on the Windows host:
+#   C:\airflow\
+#       dags\        ← mount multiple git repos here as sub-directories
+#       logs\
+#       plugins\
+#       config\
+#
+# Quick start:
+#   1. Copy .env and adjust AIRFLOW__CORE__FERNET_KEY / AIRFLOW__WEBSERVER__SECRET_KEY
+#   2. Run:  docker compose up airflow-init
+#   3. Run:  docker compose up -d
+#   4. Open: http://localhost:8080  (admin / admin)
+
+x-airflow-common: &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.9.3}
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD:-airflow}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:?Fernet key must be set in .env}
+    # ⚠️  AIRFLOW__WEBSERVER__SECRET_KEY must be set in .env before starting.
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY:?Webserver secret key must be set in .env}
+    # Disable the bundled example DAGs
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: "false"
+    # Point the scheduler & webserver at the shared dags folder
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+  volumes:
+    - ${AIRFLOW_HOME:-C:/airflow}/dags:/opt/airflow/dags
+    - ${AIRFLOW_HOME:-C:/airflow}/logs:/opt/airflow/logs
+    - ${AIRFLOW_HOME:-C:/airflow}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_HOME:-C:/airflow}/config:/opt/airflow/config
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+
+  # ── Metadata database ─────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airflow}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── One-time initialisation (DB migrations + admin user) ──────────────────
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "
+        airflow db migrate &&
+        airflow users create
+          --username admin
+          --firstname Admin
+          --lastname User
+          --role Admin
+          --email admin@example.com
+          --password admin
+      "
+    environment:
+      <<: *airflow-common-env
+      # Ensure the init job is not restarted automatically
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+    restart: "no"
+
+  # ── Scheduler ─────────────────────────────────────────────────────────────
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ── Webserver ─────────────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  postgres-db-volume:
